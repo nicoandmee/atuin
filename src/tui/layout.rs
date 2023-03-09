@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::collections::HashMap;
 
@@ -58,44 +57,77 @@ pub enum Alignment {
     Right,
 }
 
+pub trait Container: AsRef<[Constraint]> {
+    type RectContainer: AsRef<[Rect]> + AsMut<[Rect]>;
+    fn rects(&self) -> Self::RectContainer;
+}
+
+impl<const N: usize> Container for [Constraint; N] {
+    type RectContainer = [Rect; N];
+
+    fn rects(&self) -> Self::RectContainer {
+        [Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        }; N]
+    }
+}
+impl Container for Vec<Constraint> {
+    type RectContainer = Vec<Rect>;
+
+    fn rects(&self) -> Self::RectContainer {
+        vec![
+            Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            };
+            self.len()
+        ]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Layout {
+pub struct Layout<C: Container> {
     direction: Direction,
     margin: Margin,
-    constraints: Vec<Constraint>,
+    constraints: C,
     /// Whether the last chunk of the computed layout should be expanded to fill the available
     /// space.
     expand_to_fill: bool,
 }
 
-thread_local! {
-    static LAYOUT_CACHE: RefCell<HashMap<(Rect, Layout), Vec<Rect>>> = RefCell::new(HashMap::new());
-}
-
-impl Default for Layout {
-    fn default() -> Layout {
+impl Default for Layout<[Constraint; 0]> {
+    fn default() -> Self {
         Layout {
             direction: Direction::Vertical,
             margin: Margin {
                 horizontal: 0,
                 vertical: 0,
             },
-            constraints: Vec::new(),
+            constraints: [],
             expand_to_fill: true,
         }
     }
 }
 
-impl Layout {
-    pub fn constraints<C>(mut self, constraints: C) -> Layout
+impl<C: Container> Layout<C> {
+    pub fn constraints<C1>(self, constraints: C1) -> Layout<C1>
     where
-        C: Into<Vec<Constraint>>,
+        C1: Container,
     {
-        self.constraints = constraints.into();
-        self
+        Layout {
+            direction: self.direction,
+            margin: self.margin,
+            constraints,
+            expand_to_fill: self.expand_to_fill,
+        }
     }
 
-    pub fn margin(mut self, margin: u16) -> Layout {
+    pub fn margin(mut self, margin: u16) -> Self {
         self.margin = Margin {
             horizontal: margin,
             vertical: margin,
@@ -103,22 +135,22 @@ impl Layout {
         self
     }
 
-    pub fn horizontal_margin(mut self, horizontal: u16) -> Layout {
+    pub fn horizontal_margin(mut self, horizontal: u16) -> Self {
         self.margin.horizontal = horizontal;
         self
     }
 
-    pub fn vertical_margin(mut self, vertical: u16) -> Layout {
+    pub fn vertical_margin(mut self, vertical: u16) -> Self {
         self.margin.vertical = vertical;
         self
     }
 
-    pub fn direction(mut self, direction: Direction) -> Layout {
+    pub fn direction(mut self, direction: Direction) -> Self {
         self.direction = direction;
         self
     }
 
-    pub(crate) fn expand_to_fill(mut self, expand_to_fill: bool) -> Layout {
+    pub(crate) fn expand_to_fill(mut self, expand_to_fill: bool) -> Self {
         self.expand_to_fill = expand_to_fill;
         self
     }
@@ -131,7 +163,7 @@ impl Layout {
     /// # use tui::layout::{Rect, Constraint, Direction, Layout};
     /// let chunks = Layout::default()
     ///     .direction(Direction::Vertical)
-    ///     .constraints([Constraint::Length(5), Constraint::Min(0)].as_ref())
+    ///     .constraints([Constraint::Length(5), Constraint::Min(0)])
     ///     .split(Rect {
     ///         x: 2,
     ///         y: 2,
@@ -140,7 +172,7 @@ impl Layout {
     ///     });
     /// assert_eq!(
     ///     chunks,
-    ///     vec![
+    ///     [
     ///         Rect {
     ///             x: 2,
     ///             y: 2,
@@ -158,7 +190,7 @@ impl Layout {
     ///
     /// let chunks = Layout::default()
     ///     .direction(Direction::Horizontal)
-    ///     .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(2, 3)].as_ref())
+    ///     .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(2, 3)])
     ///     .split(Rect {
     ///         x: 0,
     ///         y: 0,
@@ -167,7 +199,7 @@ impl Layout {
     ///     });
     /// assert_eq!(
     ///     chunks,
-    ///     vec![
+    ///     [
     ///         Rect {
     ///             x: 0,
     ///             y: 0,
@@ -183,31 +215,22 @@ impl Layout {
     ///     ]
     /// );
     /// ```
-    pub fn split(&self, area: Rect) -> Vec<Rect> {
-        // TODO: Maybe use a fixed size cache ?
-        LAYOUT_CACHE.with(|c| {
-            c.borrow_mut()
-                .entry((area, self.clone()))
-                .or_insert_with(|| split(area, self))
-                .clone()
-        })
+    pub fn split(&self, area: Rect) -> C::RectContainer {
+        split(area, self)
     }
 }
 
 #[allow(clippy::too_many_lines)]
-fn split(area: Rect, layout: &Layout) -> Vec<Rect> {
+fn split<C: Container>(area: Rect, layout: &Layout<C>) -> C::RectContainer {
     let mut solver = Solver::new();
     let mut vars: HashMap<Variable, (usize, usize)> = HashMap::new();
     let elements = layout
         .constraints
+        .as_ref()
         .iter()
         .map(|_| Element::new())
         .collect::<Vec<Element>>();
-    let mut results = layout
-        .constraints
-        .iter()
-        .map(|_| Rect::default())
-        .collect::<Vec<Rect>>();
+    let mut results = layout.constraints.rects();
 
     let dest_area = area.inner(&layout.margin);
     for (i, e) in elements.iter().enumerate() {
@@ -216,8 +239,7 @@ fn split(area: Rect, layout: &Layout) -> Vec<Rect> {
         vars.insert(e.width, (i, 2));
         vars.insert(e.height, (i, 3));
     }
-    let mut ccs: Vec<CassowaryConstraint> =
-        Vec::with_capacity(elements.len() * 4 + layout.constraints.len() * 6);
+    let mut ccs: Vec<CassowaryConstraint> = Vec::with_capacity(elements.len() * 10);
     for elt in &elements {
         ccs.push(elt.width | GE(REQUIRED) | 0f64);
         ccs.push(elt.height | GE(REQUIRED) | 0f64);
@@ -245,7 +267,7 @@ fn split(area: Rect, layout: &Layout) -> Vec<Rect> {
             for pair in elements.windows(2) {
                 ccs.push((pair[0].x + pair[0].width) | EQ(REQUIRED) | pair[1].x);
             }
-            for (i, size) in layout.constraints.iter().enumerate() {
+            for (i, size) in layout.constraints.as_ref().iter().enumerate() {
                 ccs.push(elements[i].y | EQ(REQUIRED) | f64::from(dest_area.y));
                 ccs.push(elements[i].height | EQ(REQUIRED) | f64::from(dest_area.height));
                 ccs.push(match *size {
@@ -267,7 +289,7 @@ fn split(area: Rect, layout: &Layout) -> Vec<Rect> {
             for pair in elements.windows(2) {
                 ccs.push((pair[0].y + pair[0].height) | EQ(REQUIRED) | pair[1].y);
             }
-            for (i, size) in layout.constraints.iter().enumerate() {
+            for (i, size) in layout.constraints.as_ref().iter().enumerate() {
                 ccs.push(elements[i].x | EQ(REQUIRED) | f64::from(dest_area.x));
                 ccs.push(elements[i].width | EQ(REQUIRED) | f64::from(dest_area.width));
                 ccs.push(match *size {
@@ -295,25 +317,17 @@ fn split(area: Rect, layout: &Layout) -> Vec<Rect> {
             value as u16
         };
         match attr {
-            0 => {
-                results[index].x = value;
-            }
-            1 => {
-                results[index].y = value;
-            }
-            2 => {
-                results[index].width = value;
-            }
-            3 => {
-                results[index].height = value;
-            }
+            0 => results.as_mut()[index].x = value,
+            1 => results.as_mut()[index].y = value,
+            2 => results.as_mut()[index].width = value,
+            3 => results.as_mut()[index].height = value,
             _ => {}
         }
     }
 
     if layout.expand_to_fill {
         // Fix imprecision by extending the last item a bit if necessary
-        if let Some(last) = results.last_mut() {
+        if let Some(last) = results.as_mut().last_mut() {
             match layout.direction {
                 Direction::Vertical => {
                     last.height = dest_area.bottom() - last.y;
@@ -475,20 +489,18 @@ mod tests {
             height: 10,
         };
 
-        let chunks = Layout::default()
+        let [a, b, c] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(
-                [
-                    Constraint::Percentage(10),
-                    Constraint::Max(5),
-                    Constraint::Min(1),
-                ]
-                .as_ref(),
-            )
+            .constraints([
+                Constraint::Percentage(10),
+                Constraint::Max(5),
+                Constraint::Min(1),
+            ])
             .split(target);
 
-        assert_eq!(target.height, chunks.iter().map(|r| r.height).sum::<u16>());
-        chunks.windows(2).for_each(|w| assert!(w[0].y <= w[1].y));
+        assert_eq!(target.height, a.height + b.height + c.height);
+        assert!(a.width <= b.width);
+        assert!(b.width <= c.width);
     }
 
     #[test]

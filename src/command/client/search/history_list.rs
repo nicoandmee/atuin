@@ -15,7 +15,7 @@ pub struct HistoryList<'a> {
     block: Option<Block<'a>>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 pub struct ListState {
     offset: usize,
     selected: usize,
