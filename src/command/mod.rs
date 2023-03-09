@@ -12,7 +12,6 @@ mod init;
 
 mod contributors;
 
-
 #[derive(Subcommand)]
 #[command(infer_subcommands = true)]
 pub enum AtuinCmd {

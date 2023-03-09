@@ -1,2 +1,2 @@
-pub mod tui_shell;
 pub mod core;
+pub mod tui_shell;
