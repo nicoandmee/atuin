@@ -31,28 +31,39 @@ pub struct Guard<DB: Database> {
 }
 
 #[derive(Clone)]
+pub enum Line {
+    Up,
+    Down,
+}
+#[derive(Clone)]
+pub enum For {
+    Page,
+    SingleLine,
+}
+#[derive(Clone)]
+pub enum Towards {
+    Left,
+    Right,
+}
+#[derive(Clone)]
+pub enum To {
+    Word,
+    Char,
+    Edge,
+}
+
+#[derive(Clone)]
 pub enum Event {
-    ListUp,
-    ListDown,
-    CursorLeft,
-    CursorRight,
+    Input(char),
+    Selection(Line, For),
+    Cursor(Towards, To),
+    Delete(Towards, To),
+    Clear,
     Exit,
     UpdateNeeded(Version),
     Cancel,
     SelectN(u32),
-    PrevWord,
-    NextWord,
-    CursorStart,
-    CursorEnd,
-    DeletePrevWord,
-    DeletePrevChar,
-    DeleteNextWord,
-    DeleteNextChar,
-    Clear,
     CycleFilterMode,
-    Input(char),
-    ListDownPage,
-    ListUpPage,
 }
 
 impl<DB: Database> State<DB> {
@@ -112,20 +123,59 @@ impl<DB: Database> State<DB> {
     fn handle(mut self, event: Event) -> ControlFlow<String, Self> {
         let len = self.history.len();
         match event {
-            Event::ListUp => {
+            // moving the selection up and down
+            Event::Selection(Line::Up, For::SingleLine) => {
                 let i = self.results_state.selected() + 1;
                 self.results_state.select(i.min(len - 1));
             }
-            Event::ListDown => {
+            Event::Selection(Line::Down, For::SingleLine) => {
                 let Some(i) = self.results_state.selected().checked_sub(1) else {
                     return ControlFlow::Break(String::new())
                 };
                 self.results_state.select(i);
             }
-            Event::CursorLeft => {
+            Event::Selection(Line::Down, For::Page) => {
+                let scroll_len =
+                    self.results_state.max_entries() - self.settings.scroll_context_lines;
+                let i = self.results_state.selected().saturating_sub(scroll_len);
+                self.results_state.select(i);
+            }
+            Event::Selection(Line::Up, For::Page) => {
+                let scroll_len =
+                    self.results_state.max_entries() - self.settings.scroll_context_lines;
+                let i = self.results_state.selected() + scroll_len;
+                self.results_state.select(i.min(len - 1));
+            }
+
+            // moving the search cursor left and right
+            Event::Cursor(Towards::Left, To::Char) => {
                 self.input.left();
             }
-            Event::CursorRight => self.input.right(),
+            Event::Cursor(Towards::Right, To::Char) => self.input.right(),
+            Event::Cursor(Towards::Left, To::Word) => self
+                .input
+                .prev_word(&self.settings.word_chars, self.settings.word_jump_mode),
+            Event::Cursor(Towards::Right, To::Word) => self
+                .input
+                .next_word(&self.settings.word_chars, self.settings.word_jump_mode),
+            Event::Cursor(Towards::Left, To::Edge) => self.input.start(),
+            Event::Cursor(Towards::Right, To::Edge) => self.input.end(),
+
+            // modifying the search
+            Event::Input(c) => self.input.insert(c),
+            Event::Delete(Towards::Left, To::Word) => self
+                .input
+                .remove_prev_word(&self.settings.word_chars, self.settings.word_jump_mode),
+            Event::Delete(Towards::Left, To::Char) => self.input.back(),
+            Event::Delete(Towards::Left, To::Edge) => self.input.clear_from_start(),
+            Event::Delete(Towards::Right, To::Word) => self
+                .input
+                .remove_next_word(&self.settings.word_chars, self.settings.word_jump_mode),
+            Event::Delete(Towards::Right, To::Char) => self.input.remove(),
+            Event::Delete(Towards::Right, To::Edge) => self.input.clear_to_end(),
+            Event::Clear => self.input.clear(),
+
+            // exiting
             Event::Cancel => return ControlFlow::Break(String::new()),
             Event::Exit => {
                 return ControlFlow::Break(match self.settings.exit_mode {
@@ -141,28 +191,9 @@ impl<DB: Database> State<DB> {
                     self.history.swap_remove(i).command
                 });
             }
+
+            // misc
             Event::UpdateNeeded(version) => self.update_needed = Some(version),
-            Event::PrevWord => self
-                .input
-                .prev_word(&self.settings.word_chars, self.settings.word_jump_mode),
-            Event::NextWord => self
-                .input
-                .next_word(&self.settings.word_chars, self.settings.word_jump_mode),
-            Event::CursorStart => self.input.start(),
-            Event::CursorEnd => self.input.end(),
-            Event::DeletePrevWord => self
-                .input
-                .remove_prev_word(&self.settings.word_chars, self.settings.word_jump_mode),
-            Event::DeletePrevChar => {
-                self.input.back();
-            }
-            Event::DeleteNextWord => self
-                .input
-                .remove_next_word(&self.settings.word_chars, self.settings.word_jump_mode),
-            Event::DeleteNextChar => {
-                self.input.remove();
-            }
-            Event::Clear => self.input.clear(),
             Event::CycleFilterMode => {
                 pub static FILTER_MODES: [FilterMode; 4] = [
                     FilterMode::Global,
@@ -173,19 +204,6 @@ impl<DB: Database> State<DB> {
                 let i = self.filter_mode as usize;
                 let i = (i + 1) % FILTER_MODES.len();
                 self.filter_mode = FILTER_MODES[i];
-            }
-            Event::Input(c) => self.input.insert(c),
-            Event::ListDownPage => {
-                let scroll_len =
-                    self.results_state.max_entries() - self.settings.scroll_context_lines;
-                let i = self.results_state.selected().saturating_sub(scroll_len);
-                self.results_state.select(i);
-            }
-            Event::ListUpPage => {
-                let scroll_len =
-                    self.results_state.max_entries() - self.settings.scroll_context_lines;
-                let i = self.results_state.selected() + scroll_len;
-                self.results_state.select(i.min(len - 1));
             }
         }
         ControlFlow::Continue(self)
